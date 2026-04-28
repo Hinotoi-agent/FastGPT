@@ -18,7 +18,12 @@ vi.mock('@fastgpt/service/core/app/schema', () => ({
   }
 }));
 
-import { MCPClient, assertMCPUrlNotInternal, getMCPChildren } from '@fastgpt/service/core/app/mcp';
+import {
+  MCPClient,
+  assertMCPUrlNotInternal,
+  getMCPChildren,
+  safeMCPFetch
+} from '@fastgpt/service/core/app/mcp';
 import type { AppSchemaType } from '@fastgpt/global/core/app/type';
 
 // Access private client via prototype for spying
@@ -47,6 +52,38 @@ describe('MCPClient', () => {
 
     it('should allow public MCP endpoints', async () => {
       await expect(assertMCPUrlNotInternal('https://example.com/mcp')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('safeMCPFetch', () => {
+    it('should reject public MCP endpoints that redirect to localhost', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'http://localhost:3000/mcp' }
+        })
+      );
+
+      await expect(safeMCPFetch('https://example.com/mcp', {}, fetchImpl)).rejects.toBe(
+        'Request to private network not allowed'
+      );
+      expect(fetchImpl).toHaveBeenCalledWith(
+        'https://example.com/mcp',
+        expect.objectContaining({ redirect: 'manual' })
+      );
+    });
+
+    it('should reject public MCP endpoints that redirect to cloud metadata', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'http://169.254.169.254/latest/meta-data/' }
+        })
+      );
+
+      await expect(safeMCPFetch('https://example.com/mcp', {}, fetchImpl)).rejects.toBe(
+        'Request to private network not allowed'
+      );
     });
   });
 
@@ -445,14 +482,32 @@ describe('MCPClient', () => {
       await expect((mcpClient as any).getConnection()).rejects.toThrow('all failed');
     });
 
-    it('should return client on StreamableHTTP success', async () => {
+    it('should pass safe fetch to StreamableHTTP transport', async () => {
       const mcpClient = new MCPClient(config);
       const client = getPrivateClient(mcpClient);
       client.connect = vi.fn().mockResolvedValue(undefined);
 
       const result = await (mcpClient as any).getConnection();
+
       expect(client.connect).toHaveBeenCalledTimes(1);
       expect(result).toBe(client);
+      const transport = client.connect.mock.calls[0][0] as any;
+      expect(transport._fetch).toBe(safeMCPFetch);
+    });
+
+    it('should pass safe fetch to SSE fallback transport', async () => {
+      const mcpClient = new MCPClient(config);
+      const client = getPrivateClient(mcpClient);
+      client.connect = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('streamable failed'))
+        .mockResolvedValueOnce(undefined);
+
+      await (mcpClient as any).getConnection();
+
+      const transport = client.connect.mock.calls[1][0] as any;
+      expect(transport._fetch).toBe(safeMCPFetch);
+      expect(transport._eventSourceInit.fetch).toBeTypeOf('function');
     });
   });
 });

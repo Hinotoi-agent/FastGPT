@@ -20,6 +20,35 @@ export const assertMCPUrlNotInternal = async (url: string) => {
   }
 };
 
+const getFetchUrl = (url: RequestInfo | URL): string => {
+  if (typeof url === 'string') return url;
+  if (url instanceof URL) return url.toString();
+  return url.url;
+};
+
+export const safeMCPFetch = async (
+  url: RequestInfo | URL,
+  init?: RequestInit,
+  fetchImpl: typeof fetch = fetch
+): Promise<Response> => {
+  const requestUrl = getFetchUrl(url);
+  await assertMCPUrlNotInternal(requestUrl);
+
+  const response = await fetchImpl(url, {
+    ...init,
+    redirect: 'manual'
+  });
+
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get('location');
+    if (location) {
+      await assertMCPUrlNotInternal(new URL(location, requestUrl).toString());
+    }
+  }
+
+  return response;
+};
+
 export class MCPClient {
   private client: Client;
   private url: string;
@@ -58,7 +87,8 @@ export class MCPClient {
       const transport = new StreamableHTTPClientTransport(new URL(this.url), {
         requestInit: {
           headers: this.headers
-        }
+        },
+        fetch: safeMCPFetch
       });
       await this.client.connect(transport);
     } catch (error) {
@@ -67,6 +97,7 @@ export class MCPClient {
           requestInit: {
             headers: this.headers
           },
+          fetch: safeMCPFetch,
           eventSourceInit: {
             fetch: (url, init) => {
               const mergedHeaders: Record<string, string> = {
@@ -83,7 +114,7 @@ export class MCPClient {
                 }
               }
 
-              return fetch(url, {
+              return safeMCPFetch(url, {
                 ...init,
                 headers: mergedHeaders
               });
